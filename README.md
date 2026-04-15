@@ -1,4 +1,4 @@
-# 🎓 WorkTrack AI - Employee Attendance System
+# 🎓 Employee Attendance System
 
 An AI-powered Employee Attendance System using **Face Recognition** that automatically marks **IN/OUT time** and calculates **working hours**.
 
