@@ -3,6 +3,7 @@ opencv-python-headless
 numpy==1.24.4
 pandas==2.0.3
 Pillow==10.0.1
+setuptools
 mtcnn==0.1.1
 keras-facenet==0.3.2
 tensorflow>=2.13.0
