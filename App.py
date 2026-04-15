@@ -10,6 +10,7 @@ import joblib
 from PIL import Image
 import pandas as pd
 import datetime
+import pytz
 import mysql.connector
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase
 import av
@@ -17,7 +18,6 @@ import av
 # ------------------------------
 # DATABASE CONNECTION
 # ------------------------------
-# Use a function to handle connection to avoid "Lost connection" errors
 def get_db_connection():
     return mysql.connector.connect(
         host="82.180.143.66",
@@ -27,17 +27,10 @@ def get_db_connection():
     )
 
 # ------------------------------
-# Page Config
+# Page Config & Models
 # ------------------------------
-st.set_page_config(
-    page_title="WorkTrack AI - Employee Attendance",
-    page_icon="🏢",
-    layout="wide"
-)
+st.set_page_config(page_title="WorkTrack AI", page_icon="🏢", layout="wide")
 
-# ------------------------------
-# Load Models
-# ------------------------------
 @st.cache_resource
 def load_models():
     detector = MTCNN()
@@ -48,40 +41,43 @@ def load_models():
 
 detector, embedder, svm_model, encoder = load_models()
 threshold = 0.60
+INDIAN_TZ = pytz.timezone('Asia/Kolkata')
 
 # ------------------------------
-# CSV Paths
+# CSV Paths & Loading
 # ------------------------------
 person_csv = "Person_Info_New.csv"
 mapping_csv = "models/employee_mapping.csv"
 
-# Load CSV Files
-if os.path.exists(person_csv):
-    employees = pd.read_csv(person_csv)
-else:
-    employees = pd.DataFrame(columns=["Employee_ID","Name","Image_path"])
+def load_csv_data():
+    if os.path.exists(person_csv):
+        emps = pd.read_csv(person_csv)
+    else:
+        emps = pd.DataFrame(columns=["Employee_ID","Name","Image_path"])
+    
+    if os.path.exists(mapping_csv):
+        m_map = pd.read_csv(mapping_csv)
+    else:
+        m_map = pd.DataFrame(columns=["Employee_ID","Name"])
+    return emps, m_map
 
-if os.path.exists(mapping_csv):
-    employee_map = pd.read_csv(mapping_csv)
-else:
-    employee_map = pd.DataFrame(columns=["Employee_ID","Name"])
+employees, employee_map = load_csv_data()
 
 # ------------------------------
 # Navigation
 # ------------------------------
-tab_choice = st.sidebar.radio(
-    "Navigation",
-    ["📷 Mark Attendance", "🧑 Register Employee", "📊 Attendance Report"]
-)
+tab_choice = st.radio("Navigation", ["📷 Mark Attendance", "🧑 Register Employee", "📊 Attendance Report"], horizontal=True)
 
 # =====================================================
-# TAB 1 : ATTENDANCE (WebRTC Version)
+# TAB 1 : MARK ATTENDANCE (With Your IN/OUT Logic)
 # =====================================================
 if tab_choice == "📷 Mark Attendance":
     st.subheader("Auto Attendance System")
-    st.info("The system will automatically detect your face and mark attendance in the database.")
 
     class AttendanceProcessor(VideoProcessorBase):
+        def __init__(self):
+            self.last_processed = {}
+
         def recv(self, frame):
             img = frame.to_ndarray(format="bgr24")
             rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
@@ -94,131 +90,150 @@ if tab_choice == "📷 Mark Attendance":
             for face in faces:
                 x, y, w, h = face['box']
                 x, y = max(0, x), max(0, y)
-                face_crop = rgb_img[y:y+h, x:x+w]
+                face_img = rgb_img[y:y+h, x:x+w]
 
-                if face_crop.size > 0:
-                    face_crop = cv2.resize(face_crop, (160, 160))
-                    embedding = embedder.embeddings([face_crop])
-                    
+                if face_img.size > 0:
+                    face_img = cv2.resize(face_img, (160, 160))
+                    embedding = embedder.embeddings([face_img])
                     preds = svm_model.predict(embedding)
                     prob = svm_model.predict_proba(embedding)
+                    
                     confidence = np.max(prob)
                     name = encoder.inverse_transform(preds)[0]
 
                     if confidence >= threshold:
-                        color = (0, 255, 0) # Green
-                        label = f"{name} ({confidence*100:.1f}%)"
-                        
-                        # Database logic inside a helper to avoid threading crashes
-                        self.log_attendance(name)
+                        color = (0, 255, 0)
+                        label = f"{name} ({confidence*100:.2f}%)"
+                        self.process_attendance_logic(name)
                     else:
-                        color = (0, 0, 255) # Red
+                        color = (0, 0, 255)
                         label = "Unknown"
 
                     cv2.rectangle(img, (x, y), (x+w, y+h), color, 2)
-                    cv2.putText(img, label, (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+                    cv2.putText(img, label, (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
 
             return av.VideoFrame.from_ndarray(img, format="bgr24")
 
-        def log_attendance(self, name):
-            try:
-                temp_conn = get_db_connection()
-                temp_cursor = temp_conn.cursor()
-                today = datetime.date.today().strftime("%Y-%m-%d")
-                now = datetime.datetime.now()
+        def process_attendance_logic(self, name):
+            # Throttle to avoid hitting DB every millisecond
+            now_utc = datetime.datetime.now()
+            if name in self.last_processed and (now_utc - self.last_processed[name]).seconds < 30:
+                return
 
-                # Get Emp ID from map
+            try:
+                db = get_db_connection()
+                cursor = db.cursor()
+                
+                now_local = datetime.datetime.now(INDIAN_TZ)
+                today = now_local.strftime("%Y-%m-%d")
+                current_time_str = now_local.strftime("%H:%M:%S")
+
                 row = employee_map[employee_map["Name"] == name]
                 if not row.empty:
                     emp_id = str(row.iloc[0]["Employee_ID"])
                     
-                    temp_cursor.execute("SELECT IN_Time, OUT_Time FROM attendance WHERE Employee_ID=%s AND Date=%s", (emp_id, today))
-                    record = temp_cursor.fetchone()
+                    cursor.execute("SELECT IN_Time, OUT_Time FROM attendance WHERE Employee_ID=%s AND Date=%s", (emp_id, today))
+                    record = cursor.fetchone()
 
+                    # -------- YOUR LOGIC: IN --------
                     if record is None:
-                        temp_cursor.execute("""
+                        cursor.execute("""
                             INSERT INTO attendance (Employee_ID, Name, Date, IN_Time, OUT_Time, Hours)
                             VALUES (%s,%s,%s,%s,%s,%s)
-                        """, (emp_id, name, today, now.strftime("%H:%M:%S"), None, 0))
+                        """, (emp_id, name, today, current_time_str, None, 0))
+                        db.commit()
+                        self.last_processed[name] = now_utc
                     
-                    temp_conn.commit()
-                temp_conn.close()
-            except:
-                pass
+                    # -------- YOUR LOGIC: OUT --------
+                    else:
+                        in_time, out_time = record
+                        if out_time is None:
+                            in_dt = datetime.datetime.strptime(str(in_time), "%H:%M:%S")
+                            out_dt = datetime.datetime.strptime(current_time_str, "%H:%M:%S")
+                            
+                            worked_seconds = (out_dt - in_dt).total_seconds()
+                            if worked_seconds < 0: worked_seconds += 24*3600
+                            worked_hours = worked_seconds / 3600
 
-    webrtc_streamer(key="attendance", video_processor_factory=AttendanceProcessor, 
+                            # Only mark OUT if minimum 4 hours reached (As per your logic)
+                            if worked_hours >= 4:
+                                cursor.execute("""
+                                    UPDATE attendance SET OUT_Time=%s, Hours=%s
+                                    WHERE Employee_ID=%s AND Date=%s
+                                """, (current_time_str, round(worked_hours, 2), emp_id, today))
+                                db.commit()
+                                self.last_processed[name] = now_utc
+                db.close()
+            except Exception as e:
+                print(f"Error: {e}")
+
+    webrtc_streamer(key="attendance", video_processor_factory=AttendanceProcessor,
                     rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
 
 # =====================================================
-# TAB 2 : REGISTER EMPLOYEE (Web-Friendly Version)
+# TAB 2 : REGISTER EMPLOYEE
 # =====================================================
 elif tab_choice == "🧑 Register Employee":
     st.subheader("Register New Employee")
     
-    col1, col2 = st.columns(2)
-    with col1:
-        reg_id = st.text_input("Employee ID")
-    with col2:
-        reg_name = st.text_input("Employee Name")
+    student_id = st.text_input("Employee ID")
+    name = st.text_input("Employee Name")
+    img_file = st.camera_input("Take reference photo")
 
-    st.write("### Capture Training Photos")
-    img_file = st.camera_input("Take a clear photo of the employee")
-
-    if img_file:
-        if reg_id and reg_name:
-            # Save logic
-            dataset_path = f"dataset/{reg_name}"
+    if st.button("Submit Registration"):
+        if student_id and name and img_file:
+            dataset_path = f"dataset/{name}"
             os.makedirs(dataset_path, exist_ok=True)
             
-            # Convert to OpenCV format to detect face before saving
+            # Save Image
             img = Image.open(img_file)
             frame = np.array(img)
+            path = f"{dataset_path}/0.jpg"
+            cv2.imwrite(path, cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
             
-            faces = detector.detect_faces(frame)
-            if len(faces) > 0:
-                x, y, w, h = faces[0]['box']
-                face_img = frame[max(0,y):y+h, max(0,x):x+w]
-                face_img = cv2.resize(face_img, (160, 160))
-                
-                # We save one high-quality image. Usually, for SVM, 1-5 good images are enough.
-                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                save_path = f"{dataset_path}/img_{timestamp}.jpg"
-                cv2.imwrite(save_path, cv2.cvtColor(face_img, cv2.COLOR_RGB2BGR))
-                
-                st.success(f"Image Captured and saved to {save_path}")
-                
-                if st.button("Complete Registration"):
-                    # Update CSVs
-                    new_entry = pd.DataFrame([{"Employee_ID": reg_id, "Name": reg_name, "Image_path": save_path}])
-                    employees = pd.concat([employees, new_entry], ignore_index=True)
-                    employees.to_csv(person_csv, index=False)
-                    
-                    new_map = pd.DataFrame([{"Employee_ID": reg_id, "Name": reg_name}])
-                    employee_map = pd.concat([employee_map, new_map], ignore_index=True)
-                    employee_map.to_csv(mapping_csv, index=False)
-                    
-                    st.balloons()
-                    st.success("Registration Permanent!")
-            else:
-                st.error("No face detected! Please look directly at the camera.")
-        else:
-            st.warning("Please enter ID and Name first.")
+            # Update CSVs (Your Logic)
+            new_rows = [{"Employee_ID": student_id, "Name": name, "Image_path": path}]
+            updated_employees = pd.concat([employees, pd.DataFrame(new_rows)], ignore_index=True)
+            updated_employees.to_csv(person_csv, index=False)
+
+            new_map = [{"Employee_ID": student_id, "Name": name}]
+            updated_map = pd.concat([employee_map, pd.DataFrame(new_map)], ignore_index=True)
+            updated_map.to_csv(mapping_csv, index=False)
+            
+            st.success("Registration Successful!")
 
 # =====================================================
-# TAB 3 : ATTENDANCE REPORT
+# TAB 3 : ATTENDANCE REPORT (Your Formatting Logic)
 # =====================================================
 elif tab_choice == "📊 Attendance Report":
     st.subheader("Employee Attendance Report")
-    
+
     try:
         db = get_db_connection()
-        query = "SELECT Employee_ID, Name, Date, IN_Time, OUT_Time, Hours FROM attendance ORDER BY Date DESC"
-        df_report = pd.read_sql(query, db)
+        cursor = db.cursor()
+        cursor.execute("SELECT Employee_ID, Name, Date, IN_Time, OUT_Time, Hours FROM attendance ORDER BY Date DESC")
+        rows = cursor.fetchall()
         db.close()
 
-        if not df_report.empty:
-            st.dataframe(df_report, use_container_width=True)
+        columns = ["Employee_ID","Name","Date","IN Time","OUT Time","Hours"]
+        df = pd.DataFrame(rows, columns=columns)
+
+        if not df.empty:
+            # ✅ YOUR LOGIC: FIX IN/OUT TIME
+            df["IN Time"] = df["IN Time"].apply(lambda x: str(x).split(" ")[-1][:5] if x else "-")
+            df["OUT Time"] = df["OUT Time"].apply(lambda x: str(x).split(" ")[-1][:5] if x else "-")
+
+            # ✅ YOUR LOGIC: FIX HOURS
+            def fix_hours(x):
+                try:
+                    x = float(x)
+                    if x > 100: return round(x / 3600, 2)
+                    return round(x, 2)
+                except: return 0
+
+            df["Hours"] = df["Hours"].apply(fix_hours)
+            st.dataframe(df, use_container_width=True)
         else:
-            st.warning("No records found in database.")
+            st.warning("No attendance yet")
     except Exception as e:
-        st.error(f"Database Error: {e}")
+        st.error(f"Error: {e}")
