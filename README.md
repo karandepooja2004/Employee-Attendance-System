@@ -45,7 +45,3 @@ An AI-powered Employee Attendance System using **Face Recognition** that automat
    - OUT time (after 4+ hours)
 - Stores data in MySQL database
 - Displays attendance in dashboard
-
-## 👩‍💻 Author
-
-Pooja Karande
