@@ -69,10 +69,10 @@ employees, employee_map = load_csv_data()
 tab_choice = st.radio("Navigation", ["📷 Mark Attendance", "🧑 Register Employee", "📊 Attendance Report"], horizontal=True)
 
 # =====================================================
-# TAB 1 : MARK ATTENDANCE (With Your IN/OUT Logic)
+# TAB 1 : MARK ATTENDANCE (Live Camera Recognition)
 # =====================================================
 if tab_choice == "📷 Mark Attendance":
-    st.subheader("Auto Attendance System")
+    st.subheader("Auto Attendance System - Live Feed")
 
     class AttendanceProcessor(VideoProcessorBase):
         def __init__(self):
@@ -80,6 +80,7 @@ if tab_choice == "📷 Mark Attendance":
 
         def recv(self, frame):
             img = frame.to_ndarray(format="bgr24")
+            # Recognition needs RGB
             rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             
             try:
@@ -104,6 +105,7 @@ if tab_choice == "📷 Mark Attendance":
                     if confidence >= threshold:
                         color = (0, 255, 0)
                         label = f"{name} ({confidence*100:.2f}%)"
+                        # MARK ATTENDANCE LOGIC
                         self.process_attendance_logic(name)
                     else:
                         color = (0, 0, 255)
@@ -115,7 +117,7 @@ if tab_choice == "📷 Mark Attendance":
             return av.VideoFrame.from_ndarray(img, format="bgr24")
 
         def process_attendance_logic(self, name):
-            # Throttle to avoid hitting DB every millisecond
+            # 30-second throttle per person to prevent DB spam
             now_utc = datetime.datetime.now()
             if name in self.last_processed and (now_utc - self.last_processed[name]).seconds < 30:
                 return
@@ -135,7 +137,7 @@ if tab_choice == "📷 Mark Attendance":
                     cursor.execute("SELECT IN_Time, OUT_Time FROM attendance WHERE Employee_ID=%s AND Date=%s", (emp_id, today))
                     record = cursor.fetchone()
 
-                    # -------- YOUR LOGIC: IN --------
+                    # -------- LOGIC: IN --------
                     if record is None:
                         cursor.execute("""
                             INSERT INTO attendance (Employee_ID, Name, Date, IN_Time, OUT_Time, Hours)
@@ -144,7 +146,7 @@ if tab_choice == "📷 Mark Attendance":
                         db.commit()
                         self.last_processed[name] = now_utc
                     
-                    # -------- YOUR LOGIC: OUT --------
+                    # -------- LOGIC: OUT --------
                     else:
                         in_time, out_time = record
                         if out_time is None:
@@ -155,7 +157,7 @@ if tab_choice == "📷 Mark Attendance":
                             if worked_seconds < 0: worked_seconds += 24*3600
                             worked_hours = worked_seconds / 3600
 
-                            # Only mark OUT if minimum 4 hours reached (As per your logic)
+                            # Your 4-hour minimum check
                             if worked_hours >= 4:
                                 cursor.execute("""
                                     UPDATE attendance SET OUT_Time=%s, Hours=%s
@@ -165,13 +167,18 @@ if tab_choice == "📷 Mark Attendance":
                                 self.last_processed[name] = now_utc
                 db.close()
             except Exception as e:
-                print(f"Error: {e}")
+                pass # Silently fail in thread to prevent video freeze
 
-    webrtc_streamer(key="attendance", video_processor_factory=AttendanceProcessor,
-                    rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
+    webrtc_streamer(
+        key="attendance-live",
+        video_processor_factory=AttendanceProcessor,
+        rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
+        media_stream_constraints={"video": True, "audio": False},
+        async_processing=True
+    )
 
 # =====================================================
-# TAB 2 : REGISTER EMPLOYEE
+# TAB 2 : REGISTER EMPLOYEE (UNCHANGED)
 # =====================================================
 elif tab_choice == "🧑 Register Employee":
     st.subheader("Register New Employee")
@@ -185,13 +192,11 @@ elif tab_choice == "🧑 Register Employee":
             dataset_path = f"dataset/{name}"
             os.makedirs(dataset_path, exist_ok=True)
             
-            # Save Image
             img = Image.open(img_file)
             frame = np.array(img)
             path = f"{dataset_path}/0.jpg"
             cv2.imwrite(path, cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
             
-            # Update CSVs (Your Logic)
             new_rows = [{"Employee_ID": student_id, "Name": name, "Image_path": path}]
             updated_employees = pd.concat([employees, pd.DataFrame(new_rows)], ignore_index=True)
             updated_employees.to_csv(person_csv, index=False)
@@ -203,7 +208,7 @@ elif tab_choice == "🧑 Register Employee":
             st.success("Registration Successful!")
 
 # =====================================================
-# TAB 3 : ATTENDANCE REPORT (Your Formatting Logic)
+# TAB 3 : ATTENDANCE REPORT (UNCHANGED)
 # =====================================================
 elif tab_choice == "📊 Attendance Report":
     st.subheader("Employee Attendance Report")
@@ -219,11 +224,9 @@ elif tab_choice == "📊 Attendance Report":
         df = pd.DataFrame(rows, columns=columns)
 
         if not df.empty:
-            # ✅ YOUR LOGIC: FIX IN/OUT TIME
             df["IN Time"] = df["IN Time"].apply(lambda x: str(x).split(" ")[-1][:5] if x else "-")
             df["OUT Time"] = df["OUT Time"].apply(lambda x: str(x).split(" ")[-1][:5] if x else "-")
 
-            # ✅ YOUR LOGIC: FIX HOURS
             def fix_hours(x):
                 try:
                     x = float(x)
