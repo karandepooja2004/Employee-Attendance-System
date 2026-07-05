@@ -45,3 +45,32 @@ An AI-powered Employee Attendance System using **Face Recognition** that automat
    - OUT time (after 4+ hours)
 - Stores data in MySQL database
 - Displays attendance in dashboard
+
+---
+
+## 📂 Dataset & CSV Creation
+### 📸 Dataset Creation
+
+* Run FaceCapture.py file
+* Create a folder: dataset/
+* Inside it, create subfolders for each student:
+  
+    dataset/Rahul/
+
+    dataset/Priya/
+
+* Capture 20–50 face images per student using camera
+* Images are automatically saved in respective folders
+
+### 📄 CSV Files
+1. Person_Info_New.csv
+
+* Stores training data (image paths with labels)
+
+  EX -
+  
+    Employee_ID,Name,Image_path
+
+    E01,Rahul,dataset/Rahul/0.jpg
+  
+    E01,Rahul,dataset/Rahul/1.jpg
